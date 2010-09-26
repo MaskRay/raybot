@@ -1,0 +1,352 @@
+#!/usr/bin/perl
+use 5.010;
+use strict;
+use Getopt::Long;
+use Pod::Usage;
+use Net::IRC;
+use LWP;
+use Encode;
+use HTML::Entities;
+
+use SafeEval;
+
+use constant BOTADMIN => 'MaskRay';
+use constant MAX_LOG_LENGTH => 20;
+
+my @ARGV2 = @ARGV;
+GetOptions(
+	   'server|s=s' => \ my $server,
+	   'port|p=i' => \ my $port,
+	   'channel|c=s' => \ my $channel,
+	   'nick|n=s' => \ my $botnick,
+	   'password|w=s' => \ my $password,
+	   'admin|a=s' => \(my $botadmin = BOTADMIN),
+	   'nohtmltitle|t=s@' => \ my @no_html_title,
+	   'help' => \ my $help
+	  ) or pod2usage(1);
+pod2usage(0) if $help || ! defined $botnick;
+my %no_html_title = map { $_, 1 } map { split /,/, $_ } @no_html_title;
+
+my(%public_log, %public_nicklog, %messages);
+my $irc = Net::IRC->new();
+$channel //= "#$botnick";
+my $conn = $irc->newconn(
+			 Server => $server // 'irc.freenode.net',
+			 Port => $port // 6667,
+			 Nick => $botnick,
+			 Ircname => 'an IRC bot written by MaskRay',
+			 Username => 'bot'
+			) || die $!;
+
+sub on_connect {
+    my $conn = shift;
+    $conn->privmsg('nickserv', "identify " . $password) if length $password;
+    $conn->join($channel);
+}
+$conn->add_handler('376', \&on_connect);
+$conn->add_handler('disconnect', \&on_connect);
+
+sub on_nick_taken {
+    my $conn = shift;
+    print "My nick $botnick is taken\n";
+    $botnick = $botnick =~ /^(.*\D)?(\d+)$/ ? $1 . ($2+1) : "${botnick}2";
+    $conn->nick($botnick);
+    print "I am now known as $botnick\n";
+}
+$conn->add_handler('433', \&on_nick_taken);
+$conn->add_handler('437', \&on_nick_taken);
+
+sub on_join {
+    my($conn, $event) = @_;
+    my $nick = $event->{nick};
+    my $channel = $event->{to}[0];
+    print "$nick has joined $channel\n";
+    if (exists ${messages{$nick}} && @{$messages{$nick}}) {
+	$conn->privmsg($nick, $_) for @{$messages{$nick}};
+	$conn->privmsg($nick, '以上是给您的留言');
+	@{$messages{$nick}} = ();
+    }
+}
+$conn->add_handler('join', \&on_join);
+
+sub on_nick {
+    my($conn, $event) = @_;
+    my($oldnick, $nick) = ($event->{nick}, $event->{args}[0]);
+    print "$oldnick is now known as $nick\n";
+    if (exists ${messages{$nick}} && @{$messages{$nick}}) {
+	$conn->privmsg($nick, $_) for @{$messages{$nick}};
+	$conn->privmsg($nick, '以上是给您的留言');
+	@{$messages{$nick}} = ();
+    }
+}
+$conn->add_handler('nick', \&on_nick);
+
+sub on_part {
+    my($conn, $event) = @_;
+    my $nick = $event->{nick};
+    my $channel = $event->{to}[0];
+    print "$nick has left $channel: $event->{args}[0]\n";
+}
+$conn->add_handler('part', \&on_part);
+
+sub on_quit {
+    my($conn, $event) = @_;
+    my $nick = $event->{nick};
+    my $channel = $event->{to}[0];
+    print "$nick has quit: $event->{args}[0]\n";
+}
+$conn->add_handler('quit', \&on_quit);
+
+sub on_command {
+    my($where, $nick, $command) = @_;
+    given ($command) {
+	when (/^(h|help)$/) {
+	    $conn->privmsg($nick, "'' expr：表达式计算｜'log (channel)：频道发言记录（默认为当前频道）｜'nicklog nick (channel)：nick 在 channel 的发言记录（默认为当前频道）｜'ip addr：查询 ip 所在地｜'xx2yy text：翻译｜ 'whatis package：eix -e 查询 Gentoo Portage 软件包描述｜'msg nick text：给 nick 留言");
+	}
+	when (/^ip\s+(.*)/) {
+	    my $ip = $1;
+	    if ($ip =~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/) {
+		for ($1, $2, $3, $4) {
+		    break if $1 < 0 || $1 > 255;
+		}
+		my @data = lookup_ip($ip);
+		for (0 .. $#data) {
+		    $conn->privmsg($nick, $data[$_]);
+		}
+	    }
+	}
+	when (/^whatis\s+([[:alnum:]][-\/[:alnum:]]+)/) {
+	    open my $fh, '-|', 'eix', '-e', $1;
+	    my $output = join '', <$fh>;
+	    $conn->privmsg($nick, "Homepage: " . $1) if $output =~ /^\s+Homepage:\s+(.*)/m;
+	    $conn->privmsg($nick, $1) if $output =~ /^\s+Description:\s+(.*)/m;
+	}
+	when (/^'\s+(.*)/) {
+	    my $ret = SafeEval::safe_eval($1);
+	    $conn->privmsg($nick, $ret) if defined $ret;
+	}
+	when (/^q$/) {
+	    break if $nick ne $botadmin;
+	    $conn->quit();
+	}
+	when (/^raw\s+(.*)/) {
+	    break if $nick ne $botadmin;
+	}
+	when (/^r$/) {
+	    break if $nick ne $botadmin;
+	    $conn->quit();
+	    exec $0, @ARGV2;
+	}
+	when (/^j\s+([^\s]+)/) {
+	    break if $nick ne $botadmin;
+	    $conn->join($1);
+	}
+	when (/^p\s+([^\s]+)/) {
+	    break if $nick ne $botadmin;
+	    my $channel = $1;
+	    $conn->part($channel);
+	}
+	when (/^s\s+([^\s]+)\s+(.*)/) {
+	    break if $nick ne $botadmin;
+	    $conn->privmsg($1, $2);
+	}
+	when (/^a\s+([^\s]+)\s+(.*)/) {
+	    break if $nick ne $botadmin;
+	    $conn->me($1, $2);
+	}
+	when (/^titleon\s+([^\s]+)/) {
+	    break if $nick ne $botadmin;
+	    delete $no_html_title{$_} for split /,/, $1;
+	}
+	when (/^titleoff\s+([^\s]+)/) {
+	    break if $nick ne $botadmin;
+	    $no_html_title{$_} = 1 for split /,/, $1;
+	}
+	when (/^([-[:lower:]]+2[-[:lower:]]+)\s+(.*)/) {
+	    $conn->privmsg($nick, trans_it($1, $2));
+	}
+	when (/^log\s+([^\s]+)/) {
+	    $where = $1;
+	    $conn->privmsg($nick, $_) for @{$public_log{$where}};
+	    $conn->privmsg($nick, "以上是 $where 的发言记录") if @{$public_log{$where}};
+	}
+	when (/^nicklog\s+([^\s]+)\s+([^\s]+)/) {
+	    (my $nick2, $where) = ($1, $2);
+	    break unless exists $public_nicklog{$where}{$nick2};
+	    $conn->privmsg($nick, "<$nick2> $_") for @{$public_nicklog{$where}{$nick2}};
+	    $conn->privmsg($nick, "以上是 $nick 在 $where 的发言记录") if @{$public_nicklog{$where}{$nick2}};
+	}
+	when (/^msg\s+([^\s]+)\s+(.*)/) {
+	    push @{$messages{$1}}, "<$nick> $2";
+	    shift @{$messages{$1}} if @{$messages{$1}} > MAX_LOG_LENGTH;
+	}
+
+	break if $where !~ /^#/;
+
+	when (/^o\s+(.*)/) {
+	    break if $nick ne $botadmin;
+	    $conn->mode($where, "+o", $nick);
+	}
+	when (/^d\s+(.*)/) {
+	    break if $nick ne $botadmin;
+	    $conn->mode($where, "-o", $nick);
+	}
+	when (/^k\s+(.*)/) {
+	    break if $nick ne $botadmin;
+	    $conn->kick($where, $1);
+	}
+	when (/^log$/) {
+	    $conn->privmsg($nick, $_) for @{$public_log{$where}};
+	    $conn->privmsg($nick, "以上是 $where 的发言记录") if @{$public_log{$where}};
+	}
+	when (/^nicklog\s+([^\s]+)/) {
+	    my $nick2 = $1;
+	    break unless exists $public_nicklog{$where}{$nick2};
+	    $conn->privmsg($nick, "<$nick2> $_") for @{$public_nicklog{$where}{$nick2}};
+	    $conn->privmsg($nick, "以上是 $nick 在 $where 的发言记录") if @{$public_nicklog{$where}{$nick2}};
+	}
+    }
+}
+
+sub on_html {
+    my($where, $nick, $text) = @_;
+    return if exists $no_html_title{$where};
+    given ($text) {
+	when (m{((https?|ftp)://[\w\-_]+(\.[\w\-_]+)+([\w\-\.,@?^=%&amp;:/~\+#]*[\w\-\@?^=%&amp;/~\+#])?)} ) {
+	    my $title = encode('utf8', get_html_title($1));
+	    $conn->privmsg($where, "● 标题：$title") if defined $title;
+	}
+    }
+}
+
+sub on_mode {
+    my($conn, $event) = @_;
+    my $nick = $event->{nick};
+    my $channel = $event->{to}[0];
+    say "$nick has changed mode for $channel to @{$event->{args}}";
+}
+$conn->add_global_handler('mode', \&on_mode);
+
+sub on_caction {
+    my($conn, $event) = @_;
+    my $nick = $event->{nick};
+    say "* $nick $event->{args}[0]";
+}
+$conn->add_global_handler('caction', \&on_caction);
+
+sub on_kick {
+    my($conn, $event) = @_;
+    my $nick = $event->{nick};
+    my $channel = $event->{to}[0];
+    print "$nick has been kicked off\n";
+    if ($nick eq $botnick) {
+	print "***\n";
+	$conn->join($channel);
+	$conn->privmsg($channel, "Please don't kick me!");
+    }
+    say "$nick has kicked $event->{to}[0] off channel $event->{args}[0]";
+}
+$conn->add_global_handler('kick', \&on_kick);
+
+sub on_public {
+    my($conn, $event) = @_;
+    my $text = $event->{args}[0];
+    my $nick = $event->{nick};
+    my $channel = $event->{to}[0];
+    if ($text =~ /^'(.*)/) {
+	on_command($channel, $nick, $1);
+    } elsif ($text =~ /^$botnick[:, ]/) {
+	$conn->privmsg($nick, "我是 $botadmin 的 bot，'h 查看帮助，'msg nick 给某人留言");
+    } else {
+	on_html($channel, $nick, $text);
+    }
+    push @{$public_log{$channel}}, "<$nick> $text";
+    shift @{$public_log{$channel}} if @{$public_log{$channel}} > MAX_LOG_LENGTH;
+    push @{$public_nicklog{$channel}{$nick}}, $text;
+    shift @{$public_nicklog{$channel}{$nick}} if @{$public_nicklog{$channel}{$nick}} > MAX_LOG_LENGTH;
+    say "<$nick> $text";
+}
+$conn->add_handler('public', \&on_public);
+
+sub on_msg {
+    my ($conn, $event) = @_;
+    my $text = $event->{args}[0];
+    my $nick = $event->{nick};
+    if ($text =~ /^'(.*)/) {
+	on_command($nick, $nick, $1);
+    } else {
+	on_html($nick, $nick, $text);
+    }
+}
+$conn->add_handler('msg', \&on_msg);
+
+sub lookup_ip {
+    state $ua = LWP::UserAgent->new();
+    my $ip = shift;
+    my $url = URI->new('http://www.ip138.com/ips.asp');
+    $url->query_form(ip => $ip, action => '2');
+    my $resp = $ua->get($url);
+    return unless $resp->is_success();
+
+    my @ret;
+    $_ = decode('gb2312', $resp->content);
+    push @ret, "参考数据一：" . $1 if encode('utf8', $_) =~ /参考数据一：([^<]+)/;
+    push @ret, "参考数据二：" . $1 if encode('utf8', $_) =~ /参考数据二：([^<]+)/;
+    push @ret, "参考数据三：" . $1 if encode('utf8', $_) =~ /参考数据三：([^<]+)/;
+    return @ret;
+}
+
+sub trans_it {
+    state $ua = LWP::UserAgent->new();
+    my($type, $content) = @_;
+    $type =~ tr{2}{/};
+    my $resp = $ua ->get("http://trans-it.appspot.com/$type/$content");
+    return unless $resp->is_success();
+    return $resp->content;
+}
+
+sub get_html_title {
+    state $ua = LWP::UserAgent->new(max_size => 1024);
+    my $url = shift;
+    return unless $ua->get($url)->decoded_content =~ m{<title[^>]*>(.+?)</title}s;
+    my $title = $1;
+    $title =~ s/\n//g;
+    return decode_entities($title);
+}
+
+$irc->start();
+
+__END__
+
+=head1 NAME
+
+raybot - A simple IRC bot written by MaskRay (emacsray at gmail dot com)
+
+=head1 SYNOPSIS
+
+raybot [options]
+
+=head1 OPTIONS
+
+=item B<-s, --server>
+specify the IRC server (default: irc.freenode.net)
+
+=item B<-p, --port>
+specify the port to connect to this server on (default: 6667)
+
+=item B<-n, --nick>
+specify the nick your bot will use
+
+=item B<-w, --password>
+specify the password of the nick you specified
+
+=item B<-a, --admin>
+specify the admin of the bot
+
+=item B<-t, --nohtmltitle>
+do not output titles in these channels
+
+=item B<--help>
+print help
+
+=cut
