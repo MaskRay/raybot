@@ -5,6 +5,8 @@ use Getopt::Long;
 use Pod::Usage;
 use Net::IRC;
 use LWP;
+use URI;
+use URI::Escape qw/uri_escape/;
 use Encode;
 use HTML::Entities;
 
@@ -44,7 +46,6 @@ sub on_connect {
     $conn->join($channel);
 }
 $conn->add_handler('376', \&on_connect);
-$conn->add_handler('disconnect', \&on_connect);
 
 sub on_nick_taken {
     my $conn = shift;
@@ -300,7 +301,7 @@ sub trans_it {
     state $ua = LWP::UserAgent->new();
     my($type, $content) = @_;
     $type =~ tr{2}{/};
-    my $resp = $ua ->get("http://trans-it.appspot.com/$type/$content");
+    my $resp = $ua ->get('http://trans-it.appspot.com/' . uri_escape($type) . '/' . uri_escape($content));
     return unless $resp->is_success();
     return $resp->content;
 }
