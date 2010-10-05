@@ -279,8 +279,10 @@ sub on_notice {
     my ($conn, $event) = @_;
     my $text = $event->{args}[0];
     my $nick = $event->{nick};
-    if ($text =~ /You are now identified for/) {
+    say $text;
+    if ($text =~ /identified/ && $text =~ $botnick || $text =~ /not/ && $text =~ /registered/) {
 	$conn->join($channel);
+	$conn->{joined} = 1;
     }
 }
 $conn->add_handler('notice', \&on_notice);
