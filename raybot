@@ -42,17 +42,16 @@ my $conn = $irc->newconn(
 
 sub on_connect {
     my $conn = shift;
-    $conn->privmsg('nickserv', "identify " . $password) if length $password;
-    $conn->join($channel);
+    $conn->privmsg('NickServ', "identify " . $password) if length $password;
 }
 $conn->add_handler('376', \&on_connect);
 
 sub on_nick_taken {
     my $conn = shift;
-    print "My nick $botnick is taken\n";
+    say "My nick $botnick is taken";
     $botnick = $botnick =~ /^(.*\D)?(\d+)$/ ? $1 . ($2+1) : "${botnick}2";
     $conn->nick($botnick);
-    print "I am now known as $botnick\n";
+    say "I am now known as $botnick";
 }
 $conn->add_handler('433', \&on_nick_taken);
 $conn->add_handler('437', \&on_nick_taken);
@@ -61,7 +60,7 @@ sub on_join {
     my($conn, $event) = @_;
     my $nick = $event->{nick};
     my $channel = $event->{to}[0];
-    print "$nick has joined $channel\n";
+    say "$nick has joined $channel";
     if (exists ${messages{$nick}} && @{$messages{$nick}}) {
 	$conn->privmsg($nick, $_) for @{$messages{$nick}};
 	$conn->privmsg($nick, '以上是给您的留言');
@@ -73,7 +72,7 @@ $conn->add_handler('join', \&on_join);
 sub on_nick {
     my($conn, $event) = @_;
     my($oldnick, $nick) = ($event->{nick}, $event->{args}[0]);
-    print "$oldnick is now known as $nick\n";
+    say "$oldnick is now known as $nick";
     if (exists ${messages{$nick}} && @{$messages{$nick}}) {
 	$conn->privmsg($nick, $_) for @{$messages{$nick}};
 	$conn->privmsg($nick, '以上是给您的留言');
@@ -86,7 +85,7 @@ sub on_part {
     my($conn, $event) = @_;
     my $nick = $event->{nick};
     my $channel = $event->{to}[0];
-    print "$nick has left $channel: $event->{args}[0]\n";
+    say "$nick has left $channel: $event->{args}[0]";
 }
 $conn->add_handler('part', \&on_part);
 
@@ -94,7 +93,7 @@ sub on_quit {
     my($conn, $event) = @_;
     my $nick = $event->{nick};
     my $channel = $event->{to}[0];
-    print "$nick has quit: $event->{args}[0]\n";
+    say "$nick has quit: $event->{args}[0]";
 }
 $conn->add_handler('quit', \&on_quit);
 
@@ -239,12 +238,7 @@ sub on_kick {
     my($conn, $event) = @_;
     my $nick = $event->{nick};
     my $channel = $event->{to}[0];
-    print "$nick has been kicked off\n";
-    if ($nick eq $botnick) {
-	print "***\n";
-	$conn->join($channel);
-	$conn->privmsg($channel, "Please don't kick me!");
-    }
+    say "$nick has been kicked off";
     say "$nick has kicked $event->{to}[0] off channel $event->{args}[0]";
 }
 $conn->add_global_handler('kick', \&on_kick);
@@ -281,6 +275,16 @@ sub on_msg {
 }
 $conn->add_handler('msg', \&on_msg);
 
+sub on_notice {
+    my ($conn, $event) = @_;
+    my $text = $event->{args}[0];
+    my $nick = $event->{nick};
+    if ($text =~ /You are now identified for/) {
+	$conn->join($channel);
+    }
+}
+$conn->add_handler('notice', \&on_notice);
+
 sub lookup_ip {
     state $ua = LWP::UserAgent->new();
     my $ip = shift;
@@ -290,10 +294,10 @@ sub lookup_ip {
     return unless $resp->is_success();
 
     my @ret;
-    $_ = decode('gb2312', $resp->content);
-    push @ret, "参考数据一：" . $1 if encode('utf8', $_) =~ /参考数据一：([^<]+)/;
-    push @ret, "参考数据二：" . $1 if encode('utf8', $_) =~ /参考数据二：([^<]+)/;
-    push @ret, "参考数据三：" . $1 if encode('utf8', $_) =~ /参考数据三：([^<]+)/;
+    $_ = decode('gbk', $resp->content);
+    push @ret, "参考数据一：" . $1 if encode_utf8($_) =~ /参考数据一：([^<]+)/;
+    push @ret, "参考数据二：" . $1 if encode_utf8($_) =~ /参考数据二：([^<]+)/;
+    push @ret, "参考数据三：" . $1 if encode_utf8($_) =~ /参考数据三：([^<]+)/;
     return @ret;
 }
 
@@ -302,14 +306,13 @@ sub trans_it {
     my($type, $content) = @_;
     $type =~ tr{2}{/};
     my $resp = $ua ->get('http://trans-it.appspot.com/' . uri_escape($type) . '/' . uri_escape($content));
-    return unless $resp->is_success();
-    return $resp->content;
+    return $resp->is_success() ? $resp->content : undef;
 }
 
 sub get_html_title {
-    state $ua = LWP::UserAgent->new(max_size => 1024);
+    state $ua = LWP::UserAgent->new(max_size => 1024, agent => 'Mozilla/5.0 (X11; U; Linux x86_64; en-US; rv:1.9.2.9) Gecko/20100917 Gentoo Firefox/3.6.9');
     my $url = shift;
-    return unless $ua->get($url)->decoded_content =~ m{<title[^>]*>(.+?)</title}s;
+    return unless $ua->get($url)->decoded_content =~ m{<title[^>]*>([^<]*)</title}s;
     my $title = $1;
     $title =~ s/\n//g;
     return decode_entities($title);
