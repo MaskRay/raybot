@@ -61,10 +61,10 @@ sub on_join {
     my $nick = $event->{nick};
     my $channel = $event->{to}[0];
     say "$nick has joined $channel";
-    if (exists ${messages{$nick}} && @{$messages{$nick}}) {
-	$conn->privmsg($nick, $_) for @{$messages{$nick}};
+    if (exists ${messages{lc $nick}} && @{$messages{lc $nick}}) {
+	$conn->privmsg($nick, $_) for @{$messages{lc $nick}};
 	$conn->privmsg($nick, '以上是给您的留言');
-	@{$messages{$nick}} = ();
+	@{$messages{lc $nick}} = ();
     }
 }
 $conn->add_handler('join', \&on_join);
@@ -73,10 +73,10 @@ sub on_nick {
     my($conn, $event) = @_;
     my($oldnick, $nick) = ($event->{nick}, $event->{args}[0]);
     say "$oldnick is now known as $nick";
-    if (exists ${messages{$nick}} && @{$messages{$nick}}) {
-	$conn->privmsg($nick, $_) for @{$messages{$nick}};
+    if (exists ${messages{lc $nick}} && @{$messages{lc $nick}}) {
+	$conn->privmsg($nick, $_) for @{$messages{lc $nick}};
 	$conn->privmsg($nick, '以上是给您的留言');
-	@{$messages{$nick}} = ();
+	@{$messages{lc $nick}} = ();
     }
 }
 $conn->add_handler('nick', \&on_nick);
@@ -131,6 +131,7 @@ sub on_command {
 	}
 	when (/^raw\s+(.*)/) {
 	    break if $nick ne $botadmin;
+	    $conn->sl($1);
 	}
 	when (/^r$/) {
 	    break if $nick ne $botadmin;
@@ -177,8 +178,8 @@ sub on_command {
 	    $conn->privmsg($nick, "以上是 $nick 在 $where 的发言记录") if @{$public_nicklog{$where}{$nick2}};
 	}
 	when (/^msg\s+([^\s]+)\s+(.*)/) {
-	    push @{$messages{$1}}, "<$nick> $2";
-	    shift @{$messages{$1}} if @{$messages{$1}} > MAX_LOG_LENGTH;
+	    push @{$messages{lc $1}}, "<$nick> $2";
+	    shift @{$messages{lc $1}} if @{$messages{lc $1}} > MAX_LOG_LENGTH;
 	}
 
 	break if $where !~ /^#/;
@@ -280,7 +281,7 @@ sub on_notice {
     my $text = $event->{args}[0];
     my $nick = $event->{nick};
     say $text;
-    if ($text =~ /identified/ && $text =~ $botnick || $text =~ /not/ && $text =~ /registered/) {
+    if ($text =~ /identified (as|for)/ || $text =~ /not/ && $text =~ /registered/) {
 	$conn->join($channel);
 	$conn->{joined} = 1;
     }
