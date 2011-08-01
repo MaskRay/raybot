@@ -1,16 +1,22 @@
+import Control.Concurrent
 import Control.Monad.Reader
+import Control.Monad.State
 import Control.Exception (bracket)
 import Data.Hash.CRC32.Posix
 import Data.List (isPrefixOf)
 import Data.Time.Clock
 import Data.Time.Calendar
+import Data.Time
 import Data.Word (Word8)
 import Network
 import Numeric (showFFloat)
 import System.Exit (exitSuccess)
 import System.IO
+import System.Locale
 import Text.Printf
- 
+import Text.XML.HXT.Core hiding (utf8)
+import Text.XML.HXT.Curl
+
 server   = "irc.freenode.net"
 port     = PortNumber 6667
 mynick   = "rayhsbot"
@@ -54,6 +60,8 @@ run = do
   write "NICK" mynick
   write "USER" (mynick++" 0 * :tutorial bot")
   write "JOIN" mychan
+  bot <- ask
+  lift $ forkIO $ getFeed bot
   listen
 
 listen :: Net ()
@@ -86,3 +94,31 @@ eval (nick, act, msg) = case act of
 
 getDate :: IO (Integer, Int, Int) -- :: (year,month,day)
 getDate = getCurrentTime >>= return . toGregorian . utctDay
+
+processRss filename =
+    readDocument [withValidate no, withCurl []] filename >>>
+    getChildren >>>
+    isElem >>> hasName "rss" >>>
+    getChildren >>>
+    isElem >>> hasName "channel" >>>
+    getChildren >>>
+    isElem >>> hasName "item" >>>
+    getChildren >>>
+    isElem >>> hasName "title" <+> hasName "link" <+> hasName "pubDate" >>>
+    getChildren >>> getText
+
+getTime :: String -> UTCTime
+getTime = readTime defaultTimeLocale "%a, %d %b %Y %T %Z"
+
+getFeed :: Bot -> IO ()
+getFeed bot = 
+  evalStateT (forever $ do
+                 result <- lift $ runX $ processRss "http://www.linuxsir.org/bbs/external.php?type=RSS2"
+--                 result <- lift $ runX $ processRss "/tmp/gentoo.xml"
+                 lastCheck <- get
+                 let timestamp = getTime $ result !! 2
+                 if length result >= 3 && timestamp > lastCheck
+                   then put timestamp >> liftIO (runReaderT (action mychan $ printf "论坛新帖：%s，链接：%s\n" (result!!0) (result!!1)) bot)
+                   else return ()
+                 lift $ threadDelay 300000000
+             ) $ UTCTime {utctDay = ModifiedJulianDay 0, utctDayTime = 0}
