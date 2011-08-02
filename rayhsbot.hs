@@ -4,22 +4,27 @@ import Control.Monad.State
 import Control.Exception (bracket)
 import Data.Hash.CRC32.Posix
 import Data.List (isPrefixOf)
-import Data.Time.Clock
-import Data.Time.Calendar
 import Data.Time
 import Data.Word (Word8)
 import Network
-import Numeric (showFFloat)
+
+import Plugin.Pl.Common
+import Plugin.Pl.Optimize
+import Plugin.Pl.Parser
+import Plugin.Pl.Transform
+import Lambdabot.Pointful (pointful)
+
 import System.Exit (exitSuccess)
 import System.IO
-import System.Locale
+import System.Locale (defaultTimeLocale)
 import Text.Printf
 import Text.XML.HXT.Core hiding (utf8)
 import Text.XML.HXT.Curl
 
 server   = "irc.freenode.net"
+--server   = "localhost"
 port     = PortNumber 6667
-mynick   = "rayhsbot"
+mynick   = "raybot"
 mychan   = "#ubuntu-cn"
 myowner  = "MaskRay"
 
@@ -47,18 +52,18 @@ main = bracket connect disconnect loop
   where
     disconnect = hClose . socket
     loop bot = catch (runReaderT run bot) (const $ return ())
-  
+
 connect :: IO Bot
 connect = do
   h <- connectTo server port
-  hSetBuffering h NoBuffering
+  hSetBuffering h LineBuffering
   hSetEncoding h utf8
   return $ Bot h
 
 run :: Net ()
 run = do
   write "NICK" mynick
-  write "USER" (mynick++" 0 * :tutorial bot")
+  write "USER" (mynick++" 0 * :MaskRay's bot")
   write "JOIN" mychan
   bot <- ask
   lift $ forkIO $ getFeed bot
@@ -80,20 +85,25 @@ listen = forever $ do
 
 eval :: (String, [String], String) -> Net ()
 eval (nick, act, msg) = case act of
-  ["PRIVMSG", chan] | "jrrp" `isPrefixOf` msg
-                      -> do
-                        (year,month,day) <- lift getDate
-                        let s = show year++show month++show day++nick
-                            value = fromIntegral (crc32 s) :: Word8
-                        action chan $ printf "%s今日的人品指数：[>>>>>>>>>>>>>>>>>>>>>>>>]%.3f%%" nick (fromIntegral value/256*100::Double)
+  ["PRIVMSG", chan] | "jrrp" `isPrefixOf` msg -> do
+    julianDay <- lift getDate
+    let s = show julianDay++nick
+        value = fromIntegral (crc32 s) :: Word8
+        score = fromIntegral value/256*100::Double
+        barLen = round (score/5)
+    action chan $ printf "%s今日的人品指数：[%s%s] %.3f%% (Lv %d/%d)" nick (replicate barLen '>') (replicate (20-barLen) '.') score barLen (20::Int)
+                    | ".pl " `isPrefixOf` msg ->
+                        privmsg (if "#" `isPrefixOf` chan then chan else nick) $ pl (drop 4 msg) False
+                    | ".pf " `isPrefixOf` msg ->
+                        privmsg (if "#" `isPrefixOf` chan then chan else nick) $ pointful (drop 4 msg)
                     | nick == myowner && chan == mynick ->
                         writeRaw msg
-                    | nick == myowner && ".quit" `isPrefixOf` msg -> 
+                    | nick == myowner && ".quit" `isPrefixOf` msg ->
                       write "QUIT" ":Bye" >> lift exitSuccess
+  ["INVITE", _] -> write "JOIN" msg
   _ -> return ()
-
-getDate :: IO (Integer, Int, Int) -- :: (year,month,day)
-getDate = getCurrentTime >>= return . toGregorian . utctDay
+  where
+    getDate = getCurrentTime >>= return . toModifiedJulianDay . utctDay :: IO Integer
 
 processRss filename =
     readDocument [withValidate no, withCurl []] filename >>>
@@ -107,18 +117,22 @@ processRss filename =
     isElem >>> hasName "title" <+> hasName "link" <+> hasName "pubDate" >>>
     getChildren >>> getText
 
-getTime :: String -> UTCTime
-getTime = readTime defaultTimeLocale "%a, %d %b %Y %T %Z"
-
 getFeed :: Bot -> IO ()
 getFeed bot = 
   evalStateT (forever $ do
                  result <- lift $ runX $ processRss "http://www.linuxsir.org/bbs/external.php?type=RSS2"
---                 result <- lift $ runX $ processRss "/tmp/gentoo.xml"
                  lastCheck <- get
                  let timestamp = getTime $ result !! 2
                  if length result >= 3 && timestamp > lastCheck
-                   then put timestamp >> liftIO (runReaderT (action mychan $ printf "论坛新帖：%s，链接：%s\n" (result!!0) (result!!1)) bot)
+                   then put timestamp >> liftIO (runReaderT (action mychan $ printf "论坛新帖：%s %s\n" (result!!0) (result!!1)) bot)
                    else return ()
                  lift $ threadDelay 300000000
              ) $ UTCTime {utctDay = ModifiedJulianDay 0, utctDayTime = 0}
+  where
+    getTime str = readTime defaultTimeLocale "%a, %d %b %Y %T %Z" str :: UTCTime
+    
+
+pl :: String -> Bool -> String
+pl input verbose = case parsePF input of
+  Right d -> show $ last $ mapTopLevel' optimize $ mapTopLevel transform d
+  Left err -> err
