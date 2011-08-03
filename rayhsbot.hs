@@ -4,8 +4,11 @@ import Control.Monad.State
 import Control.Exception (bracket)
 import Data.Hash.CRC32.Posix
 import Data.List (isPrefixOf)
+import Data.Maybe
 import Data.Time
 import Data.Word (Word8)
+import qualified Language.Brainfuck as BF
+import Language.Haskell.Interpreter (eval, runInterpreter, setImports)
 import Network
 
 import Plugin.Pl.Common
@@ -17,6 +20,7 @@ import Lambdabot.Pointful (pointful)
 import System.Exit (exitSuccess)
 import System.IO
 import System.Locale (defaultTimeLocale)
+import System.Timeout (timeout)
 import Text.Printf
 import Text.XML.HXT.Core hiding (utf8)
 import Text.XML.HXT.Curl
@@ -76,34 +80,52 @@ listen = forever $ do
   lift $ putStrLn s
   if "PING :" `isPrefixOf` s
     then pong s
-    else eval (parse s)
+    else interactIRC (parse s)
   where
     pong x = write "PONG" (':':drop 6 x)
     parse x = (takeWhile (/='!') $ tail x,
                words $ takeWhile (/=':') $ tail $ dropWhile (/=' ') $ tail x,
                drop 1 $ dropWhile (/= ':') $ tail x)
 
-eval :: (String, [String], String) -> Net ()
-eval (nick, act, msg) = case act of
-  ["PRIVMSG", chan] | "jrrp" `isPrefixOf` msg -> do
+interactPRIVMSG :: String -> String -> String -> Net ()
+interactPRIVMSG nick chan msg
+  | "jrrp" `isPrefixOf` msg = do
+    let target = if "#" `isPrefixOf` chan then chan else nick
     julianDay <- lift getDate
     let s = show julianDay++nick
         value = fromIntegral (crc32 s) :: Word8
         score = fromIntegral value/256*100::Double
         barLen = round (score/5)
     action chan $ printf "%s今日的人品指数：[%s%s] %.3f%% (Lv %d/%d)" nick (replicate barLen '>') (replicate (20-barLen) '.') score barLen (20::Int)
-                    | ".pl " `isPrefixOf` msg ->
-                        privmsg (if "#" `isPrefixOf` chan then chan else nick) $ pl (drop 4 msg) False
-                    | ".pf " `isPrefixOf` msg ->
-                        privmsg (if "#" `isPrefixOf` chan then chan else nick) $ pointful (drop 4 msg)
-                    | nick == myowner && chan == mynick ->
-                        writeRaw msg
-                    | nick == myowner && ".quit" `isPrefixOf` msg ->
-                      write "QUIT" ":Bye" >> lift exitSuccess
+  | ".pl " `isPrefixOf` msg =
+    privmsg target $ pl (drop 4 msg) False
+  | ".pf " `isPrefixOf` msg =
+    privmsg target $ pointful (drop 4 msg)
+  | ".bf " `isPrefixOf` msg = do
+    result <- liftIO $ timeout 400000 $ BF.execute (drop 4 msg)
+    case result of
+      Nothing -> privmsg target $ "timeout"
+      Just w -> privmsg target w
+  | nick == myowner && chan == mynick =
+      writeRaw msg
+  | nick == myowner && ".e " `isPrefixOf` msg = do
+    result <- runInterpreter $ setImports ["Prelude","Data.List","Control.Arrow","Control.Monad"] >> eval (drop 3 msg)
+    case result of
+      Left err -> privmsg target $ show err
+      Right str -> privmsg target str
+  | nick == myowner && ".quit" `isPrefixOf` msg =
+    write "QUIT" ":Bye" >> lift exitSuccess
+  | otherwise = return ()
+  where
+    getDate = getCurrentTime >>= return . toModifiedJulianDay . utctDay :: IO Integer
+    target = if "#" `isPrefixOf` chan then chan else nick
+
+interactIRC :: (String, [String], String) -> Net ()
+interactIRC (nick, act, msg) = case act of
+  ["PRIVMSG", chan] -> interactPRIVMSG nick chan msg
   ["INVITE", _] -> write "JOIN" msg
   _ -> return ()
   where
-    getDate = getCurrentTime >>= return . toModifiedJulianDay . utctDay :: IO Integer
 
 processRss filename =
     readDocument [withValidate no, withCurl []] filename >>>
@@ -119,7 +141,7 @@ processRss filename =
 
 getFeed :: Bot -> IO ()
 getFeed bot = 
-  evalStateT (forever $ do
+  getCurrentTime >>= evalStateT (forever $ do
                  result <- lift $ runX $ processRss "http://www.linuxsir.org/bbs/external.php?type=RSS2"
                  lastCheck <- get
                  let timestamp = getTime $ result !! 2
@@ -127,7 +149,7 @@ getFeed bot =
                    then put timestamp >> liftIO (runReaderT (action mychan $ printf "论坛新帖：%s %s\n" (result!!0) (result!!1)) bot)
                    else return ()
                  lift $ threadDelay 300000000
-             ) $ UTCTime {utctDay = ModifiedJulianDay 0, utctDayTime = 0}
+             )
   where
     getTime str = readTime defaultTimeLocale "%a, %d %b %Y %T %Z" str :: UTCTime
     
