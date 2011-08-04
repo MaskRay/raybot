@@ -1,13 +1,13 @@
 import Control.Concurrent
 import Control.Monad.Reader
 import Control.Monad.State
-import Control.Exception (bracket)
+import Control.Exception (bracket, evaluate)
 import Data.Hash.CRC32.Posix
 import Data.List (isPrefixOf)
 import Data.Maybe
 import Data.Time
 import Data.Word (Word8)
-import qualified Language.Brainfuck as BF
+import qualified Brainfuck as BF
 import Language.Haskell.Interpreter (eval, runInterpreter, setImports)
 import Network
 
@@ -102,7 +102,7 @@ interactPRIVMSG nick chan msg
   | ".pf " `isPrefixOf` msg =
     privmsg target $ pointful (drop 4 msg)
   | ".bf " `isPrefixOf` msg = do
-    result <- liftIO $ timeout 400000 $ BF.execute (drop 4 msg)
+    result <- liftIO . timeout 100000 . evaluate $ BF.executeProgram (drop 4 msg)
     case result of
       Nothing -> privmsg target $ "timeout"
       Just w -> privmsg target w
